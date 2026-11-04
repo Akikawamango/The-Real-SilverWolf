@@ -1,9 +1,10 @@
 import crypto from 'node:crypto';
+import { EmbedBuilder } from 'discord.js';
 import { logger } from '../utils/logger.js';
 
 const KEY = 'roblox:leaderboard';
 const MAX_ENTRIES = 200;
-const MAX_SCORE = 1e15;
+const MAX_POSTED = 30;
 
 let queue = Promise.resolve();
 const serialize = (fn) => {
@@ -12,19 +13,23 @@ const serialize = (fn) => {
   return run;
 };
 
+// The stored array order is the ranking. Older entries had a numeric score:
+// sort those once by score so existing rankings carry over, then drop the field.
 const load = async (db) => {
   const list = await db.get(KEY, []);
-  return Array.isArray(list) ? list : [];
+  if (!Array.isArray(list)) return [];
+  if (list.some(e => 'score' in e)) {
+    list.sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0));
+    for (const e of list) delete e.score;
+  }
+  return list;
 };
 
-const sorted = (list) =>
-  [...list].sort((a, b) => b.score - a.score || a.username.localeCompare(b.username));
-
-const publicEntry = ({ id, username, displayName, robloxId, avatarUrl, score }) =>
-  ({ id, username, displayName, robloxId, avatarUrl, score });
+const publicEntry = ({ id, username, displayName, robloxId, avatarUrl }) =>
+  ({ id, username, displayName, robloxId, avatarUrl });
 
 export async function getLeaderboard(db) {
-  return sorted(await load(db)).map(publicEntry);
+  return (await load(db)).map(publicEntry);
 }
 
 async function lookupRobloxUser(username) {
@@ -51,25 +56,17 @@ async function lookupRobloxUser(username) {
   return { robloxId: user.id, username: user.name, displayName: user.displayName, avatarUrl };
 }
 
-const parseScore = (value) => {
-  const n = Number(value);
-  if (!Number.isFinite(n) || Math.abs(n) > MAX_SCORE) return null;
-  return n;
-};
-
-class HttpError extends Error {
+export class HttpError extends Error {
   constructor(status, message) {
     super(message);
     this.status = status;
   }
 }
 
-export function addEntry(db, { username, score }) {
+export function addEntry(db, { username }) {
   return serialize(async () => {
     const name = String(username || '').trim();
     if (!/^[A-Za-z0-9_]{3,20}$/.test(name)) throw new HttpError(400, 'Enter a valid Roblox username');
-    const n = parseScore(score ?? 0);
-    if (n === null) throw new HttpError(400, 'Score must be a number');
 
     const list = await load(db);
     if (list.length >= MAX_ENTRIES) throw new HttpError(400, `Leaderboard is full (${MAX_ENTRIES})`);
@@ -80,22 +77,25 @@ export function addEntry(db, { username, score }) {
       throw new HttpError(409, `${user.username} is already on the leaderboard`);
     }
 
-    const entry = { id: crypto.randomUUID(), ...user, score: n };
+    const entry = { id: crypto.randomUUID(), ...user };
     if (!(await db.set(KEY, [...list, entry]))) throw new HttpError(503, 'Database unavailable');
     return publicEntry(entry);
   });
 }
 
-export function updateEntry(db, id, { score }) {
+export function reorderEntries(db, ids) {
   return serialize(async () => {
-    const n = parseScore(score);
-    if (n === null) throw new HttpError(400, 'Score must be a number');
     const list = await load(db);
-    const entry = list.find(e => e.id === id);
-    if (!entry) throw new HttpError(404, 'Entry not found');
-    entry.score = n;
-    if (!(await db.set(KEY, list))) throw new HttpError(503, 'Database unavailable');
-    return publicEntry(entry);
+    if (!Array.isArray(ids) || ids.length !== list.length || new Set(ids).size !== ids.length) {
+      throw new HttpError(409, 'The list changed. Reload the page and try again.');
+    }
+    const byId = new Map(list.map(e => [e.id, e]));
+    if (!ids.every(id => byId.has(id))) {
+      throw new HttpError(409, 'The list changed. Reload the page and try again.');
+    }
+    const next = ids.map(id => byId.get(id));
+    if (!(await db.set(KEY, next))) throw new HttpError(503, 'Database unavailable');
+    return next.map(publicEntry);
   });
 }
 
@@ -106,6 +106,51 @@ export function removeEntry(db, id) {
     if (next.length === list.length) throw new HttpError(404, 'Entry not found');
     if (!(await db.set(KEY, next))) throw new HttpError(503, 'Database unavailable');
   });
+}
+
+async function freshAvatars(entries) {
+  const urls = new Map();
+  try {
+    const ids = entries.map(e => e.robloxId).join(',');
+    const res = await fetch(
+      `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${ids}&size=150x150&format=Png`,
+      { signal: AbortSignal.timeout(8000) },
+    );
+    for (const t of (await res.json()).data || []) {
+      if (t.imageUrl) urls.set(t.targetId, t.imageUrl);
+    }
+  } catch (error) {
+    logger.warn('Roblox avatar refresh failed, using saved avatars:', error);
+  }
+  return urls;
+}
+
+/**
+ * One embed per player (Discord allows one thumbnail per embed), 10 embeds per message.
+ * Returns { header, batches } where each batch is the embeds for one message.
+ */
+export async function buildLeaderboardMessages(db) {
+  const all = await getLeaderboard(db);
+  if (!all.length) throw new HttpError(400, 'The leaderboard is empty');
+  const top = all.slice(0, MAX_POSTED);
+  const avatars = await freshAvatars(top);
+  const medals = ['🥇', '🥈', '🥉'];
+  const colors = [0xf0b232, 0xc0c4cc, 0xcd7f32];
+  const esc = (t) => String(t).replace(/_/g, '\\_');
+
+  const embeds = top.map((e, i) => {
+    const embed = new EmbedBuilder()
+      .setColor(colors[i] ?? 0x5865f2)
+      .setDescription(`${medals[i] || `**#${i + 1}**`}  **${esc(e.displayName)}**\n@${esc(e.username)}`);
+    const img = avatars.get(e.robloxId) || e.avatarUrl;
+    if (img) embed.setThumbnail(img);
+    return embed;
+  });
+
+  const batches = [];
+  for (let i = 0; i < embeds.length; i += 10) batches.push(embeds.slice(i, i + 10));
+  const footer = all.length > top.length ? `\n*Showing the top ${top.length} of ${all.length}*` : '';
+  return { header: '## Leaderboard' + footer, batches };
 }
 
 export const sendError = (res, error) => {
@@ -129,10 +174,10 @@ li{display:flex;align-items:center;gap:12px;background:#2b2d31;border-radius:8px
 li:nth-child(1) .rank{color:#f0b232}li:nth-child(2) .rank{color:#c0c4cc}li:nth-child(3) .rank{color:#cd7f32}
 img,.ph{width:40px;height:40px;border-radius:50%;background:#3f4147;flex:none}
 .who{flex:1;min-width:0}.who b{display:block;overflow:hidden;text-overflow:ellipsis}.who small{color:#949ba4}
-.score{font-weight:700;font-variant-numeric:tabular-nums}
 .row{display:flex;gap:8px}.row input{flex:1;min-width:0}
 select{flex:1;min-width:0;font:inherit;color:inherit;background:#2b2d31;border:1px solid #3f4147;border-radius:6px;padding:8px 10px}
-li input{width:90px;text-align:right}
+li button.up,li button.down{background:#3f4147;padding:6px 9px}
+li[draggable=true]{cursor:grab}li.drag{opacity:.4}li.over{outline:2px solid #5865f2}
 #status{margin-top:12px;min-height:20px;font-size:14px}.ok{color:#57f287}.err{color:#ed4245}.empty{color:#949ba4;margin-top:20px}
 .hidden{display:none}`;
 
@@ -141,11 +186,10 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 const safeImg=u=>/^https:\\/\\/[a-z0-9.-]+\\.rbxcdn\\.com\\//.test(u||'')?u:'';
 function row(e,i,edit){
   const img=safeImg(e.avatarUrl);
-  return '<li data-id="'+esc(e.id)+'"><span class="rank">'+(i+1)+'</span>'
+  return '<li '+(edit?'draggable="true" ':'')+'data-id="'+esc(e.id)+'"><span class="rank">'+(i+1)+'</span>'
    +(img?'<img src="'+esc(img)+'" alt="">':'<span class="ph"></span>')
    +'<span class="who"><b>'+esc(e.displayName)+'</b><small>@'+esc(e.username)+'</small></span>'
-   +(edit?'<input type="number" step="any" value="'+esc(e.score)+'" class="sc"><button class="save">Save</button><button class="del">Remove</button>'
-         :'<span class="score">'+esc(e.score.toLocaleString())+'</span>')+'</li>';
+   +(edit?'<button class="up" title="Move up">&#9650;</button><button class="down" title="Move down">&#9660;</button><button class="del">Remove</button>':'')+'</li>';
 }`;
 
 export const PUBLIC_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -162,9 +206,10 @@ export const ADMIN_PAGE = `<!doctype html><html lang="en"><head><meta charset="u
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Edit leaderboard</title>
 <style>${CSS}</style></head><body><main>
 <h1>Edit leaderboard</h1>
+<p style="color:#949ba4;font-size:14px">Drag players, or use the arrows, to set their spot. Top is #1.</p>
 <p><a href="/dashboard">Send messages</a> · <a href="/leaderboard">Public view</a></p>
 <form id="login"><div class="row"><input id="pw" type="password" placeholder="Dashboard password" required><button>Unlock</button></div></form>
-<form id="add" class="row hidden"><input id="u" placeholder="Roblox username" required maxlength="20"><input id="s" type="number" step="any" value="0" style="max-width:100px"><button id="addbtn">Add</button></form>
+<form id="add" class="row hidden"><input id="u" placeholder="Roblox username" required maxlength="20"><button id="addbtn">Add</button></form>
 <form id="post" class="row hidden" style="margin-top:12px"><select id="guild"></select><select id="channel"></select><button id="postbtn">Post to Discord</button></form>
 <ol id="list"></ol><div id="status"></div>
 <script>${RENDER}
@@ -210,21 +255,45 @@ $('post').onsubmit=async e=>{
 };
 $('add').onsubmit=async e=>{
   e.preventDefault();$('addbtn').disabled=true;say('Looking up Roblox user...');
-  try{await api('',{method:'POST',body:JSON.stringify({username:$('u').value,score:$('s').value})});
+  try{await api('',{method:'POST',body:JSON.stringify({username:$('u').value})});
     $('u').value='';await load();say('Added.','ok')}catch(err){say(err.message,'err')}
   $('addbtn').disabled=false;
 };
+let busy=false;
+async function saveOrder(){
+  const ids=[...$('list').children].map(li=>li.dataset.id);
+  try{await api('/order',{method:'PUT',body:JSON.stringify({ids})});await load();say('Order saved.','ok')}
+  catch(err){say(err.message,'err');await load()}
+}
 $('list').onclick=async e=>{
-  const li=e.target.closest('li');if(!li)return;const id=li.dataset.id;
+  const li=e.target.closest('li');if(!li||busy)return;
+  const c=e.target.classList;
   try{
-    if(e.target.classList.contains('save')){
-      await api('/'+encodeURIComponent(id),{method:'PATCH',body:JSON.stringify({score:li.querySelector('.sc').value})});
-      await load();say('Saved.','ok');
-    }else if(e.target.classList.contains('del')){
+    if(c.contains('up')&&li.previousElementSibling){li.parentNode.insertBefore(li,li.previousElementSibling);await saveOrder()}
+    else if(c.contains('down')&&li.nextElementSibling){li.parentNode.insertBefore(li.nextElementSibling,li);await saveOrder()}
+    else if(c.contains('del')){
       if(!confirm('Remove this player?'))return;
-      await api('/'+encodeURIComponent(id),{method:'DELETE'});await load();say('Removed.','ok');
+      await api('/'+encodeURIComponent(li.dataset.id),{method:'DELETE'});await load();say('Removed.','ok');
     }
   }catch(err){say(err.message,'err')}
 };
+let dragged=null;
+$('list').ondragstart=e=>{dragged=e.target.closest('li');if(dragged){dragged.classList.add('drag');e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain','')}};
+$('list').ondragover=e=>{
+  if(!dragged)return;e.preventDefault();
+  const over=e.target.closest('li');
+  [...$('list').children].forEach(x=>x.classList.remove('over'));
+  if(over&&over!==dragged)over.classList.add('over');
+};
+$('list').ondrop=async e=>{
+  e.preventDefault();
+  const over=e.target.closest('li');
+  if(dragged&&over&&over!==dragged){
+    const kids=[...$('list').children];
+    over.parentNode.insertBefore(dragged,kids.indexOf(dragged)<kids.indexOf(over)?over.nextSibling:over);
+    dragged=null;await saveOrder();
+  }
+};
+$('list').ondragend=()=>{dragged=null;[...$('list').children].forEach(x=>x.classList.remove('drag','over'))};
 if(token)load();
 </script></main></body></html>`;
