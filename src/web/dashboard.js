@@ -2,6 +2,9 @@ import express from 'express';
 import crypto from 'node:crypto';
 import { ChannelType, PermissionFlagsBits } from 'discord.js';
 import { logger } from '../utils/logger.js';
+import {
+  ADMIN_PAGE, getLeaderboard, addEntry, updateEntry, removeEntry, sendError,
+} from './leaderboard.js';
 
 const SENDABLE_TYPES = new Set([ChannelType.GuildText, ChannelType.GuildAnnouncement]);
 const MAX_LENGTH = 2000;
@@ -47,6 +50,24 @@ export function createDashboardRouter(client) {
   });
 
   router.use('/api', express.json({ limit: '16kb' }), auth);
+
+  router.get('/leaderboard', (req, res) => {
+    res.set('Cache-Control', 'no-store').type('html').send(ADMIN_PAGE);
+  });
+
+  const lb = express.Router();
+  const wrap = (fn) => async (req, res) => {
+    try {
+      res.json(await fn(req));
+    } catch (error) {
+      sendError(res, error);
+    }
+  };
+  lb.get('/', wrap(async () => ({ entries: await getLeaderboard(client.db) })));
+  lb.post('/', wrap(async (req) => ({ entry: await addEntry(client.db, req.body || {}) })));
+  lb.patch('/:id', wrap(async (req) => ({ entry: await updateEntry(client.db, req.params.id, req.body || {}) })));
+  lb.delete('/:id', wrap(async (req) => { await removeEntry(client.db, req.params.id); return { ok: true }; }));
+  router.use('/api/leaderboard', lb);
 
   router.get('/api/channels', (req, res) => {
     const guilds = [...client.guilds.cache.values()].map(guild => {
@@ -113,6 +134,7 @@ button:disabled{opacity:.5;cursor:default}
   <input id="pw" type="password" autocomplete="current-password" required>
   <button>Unlock</button>
 </form>
+<p><a href="/dashboard/leaderboard" style="color:#8ea1e1">Edit leaderboard</a></p>
 <form id="send" class="hidden">
   <label for="guild">Server</label><select id="guild"></select>
   <label for="channel">Channel</label><select id="channel"></select>
