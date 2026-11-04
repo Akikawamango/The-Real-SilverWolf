@@ -1,9 +1,9 @@
 import express from 'express';
 import crypto from 'node:crypto';
-import { ChannelType, EmbedBuilder, PermissionFlagsBits } from 'discord.js';
+import { ChannelType, PermissionFlagsBits } from 'discord.js';
 import { logger } from '../utils/logger.js';
 import {
-  ADMIN_PAGE, getLeaderboard, addEntry, updateEntry, removeEntry, sendError,
+  ADMIN_PAGE, getLeaderboard, addEntry, reorderEntries, removeEntry, buildLeaderboardMessages, sendError, HttpError,
 } from './leaderboard.js';
 
 const SENDABLE_TYPES = new Set([ChannelType.GuildText, ChannelType.GuildAnnouncement]);
@@ -65,7 +65,7 @@ export function createDashboardRouter(client) {
   };
   lb.get('/', wrap(async () => ({ entries: await getLeaderboard(client.db) })));
   lb.post('/', wrap(async (req) => ({ entry: await addEntry(client.db, req.body || {}) })));
-  lb.patch('/:id', wrap(async (req) => ({ entry: await updateEntry(client.db, req.params.id, req.body || {}) })));
+  lb.put('/order', wrap(async (req) => ({ entries: await reorderEntries(client.db, (req.body || {}).ids) })));
   lb.delete('/:id', wrap(async (req) => { await removeEntry(client.db, req.params.id); return { ok: true }; }));
   lb.post('/post', async (req, res) => {
     const { channelId } = req.body || {};
@@ -74,24 +74,17 @@ export function createDashboardRouter(client) {
       if (!channel || !SENDABLE_TYPES.has(channel.type) || !channel.guild) {
         return res.status(404).json({ error: 'Channel not found' });
       }
-      const entries = await getLeaderboard(client.db);
-      if (!entries.length) return res.status(400).json({ error: 'The leaderboard is empty' });
-      const top = entries.slice(0, 25);
-      const medals = ['🥇', '🥈', '🥉'];
-      const esc = (t) => String(t).replace(/_/g, '\\_');
-      const lines = top.map((e, i) =>
-        `${medals[i] || `**${i + 1}.**`} **${esc(e.displayName)}** (@${esc(e.username)}) — ${e.score.toLocaleString('en-US')}`);
-      const embed = new EmbedBuilder()
-        .setTitle('Leaderboard')
-        .setDescription(lines.join('\n').slice(0, 4000))
-        .setColor(0x5865f2)
-        .setTimestamp();
-      if (entries.length > top.length) embed.setFooter({ text: `Top ${top.length} of ${entries.length}` });
-      const sent = await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+      const { header, batches } = await buildLeaderboardMessages(client.db);
+      const noPing = { parse: [] };
+      const sent = await channel.send({ content: header, embeds: batches[0], allowedMentions: noPing });
+      for (const embeds of batches.slice(1)) {
+        await channel.send({ embeds, allowedMentions: noPing });
+      }
       logger.info(`Dashboard leaderboard posted to #${channel.name} (${channel.guild.name})`);
       res.json({ ok: true, messageId: sent.id });
     } catch (error) {
       logger.error('Dashboard leaderboard post failed:', error);
+      if (error instanceof HttpError) return sendError(res, error);
       res.status(502).json({ error: error?.message || 'Discord rejected the message' });
     }
   });
