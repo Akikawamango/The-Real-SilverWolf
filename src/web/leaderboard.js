@@ -5,6 +5,7 @@ import { logger } from '../utils/logger.js';
 const KEY = 'roblox:leaderboard';
 const MAX_ENTRIES = 200;
 const MAX_POSTED = 30;
+const MAX_DESCRIPTION = 200;
 
 let queue = Promise.resolve();
 const serialize = (fn) => {
@@ -25,8 +26,16 @@ const load = async (db) => {
   return list;
 };
 
-const publicEntry = ({ id, username, displayName, robloxId, avatarUrl }) =>
-  ({ id, username, displayName, robloxId, avatarUrl });
+const publicEntry = ({ id, username, displayName, robloxId, avatarUrl, description }) =>
+  ({ id, username, displayName, robloxId, avatarUrl, description: description || '' });
+
+const cleanDescription = (value) => {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  if (text.length > MAX_DESCRIPTION) {
+    throw new HttpError(400, `Description is over ${MAX_DESCRIPTION} characters`);
+  }
+  return text;
+};
 
 export async function getLeaderboard(db) {
   return (await load(db)).map(publicEntry);
@@ -63,8 +72,9 @@ export class HttpError extends Error {
   }
 }
 
-export function addEntry(db, { username }) {
+export function addEntry(db, { username, description }) {
   return serialize(async () => {
+    const desc = cleanDescription(description);
     const name = String(username || '').trim();
     if (!/^[A-Za-z0-9_]{3,20}$/.test(name)) throw new HttpError(400, 'Enter a valid Roblox username');
 
@@ -77,8 +87,20 @@ export function addEntry(db, { username }) {
       throw new HttpError(409, `${user.username} is already on the leaderboard`);
     }
 
-    const entry = { id: crypto.randomUUID(), ...user };
+    const entry = { id: crypto.randomUUID(), ...user, description: desc };
     if (!(await db.set(KEY, [...list, entry]))) throw new HttpError(503, 'Database unavailable');
+    return publicEntry(entry);
+  });
+}
+
+export function updateEntry(db, id, { description }) {
+  return serialize(async () => {
+    const desc = cleanDescription(description);
+    const list = await load(db);
+    const entry = list.find(e => e.id === id);
+    if (!entry) throw new HttpError(404, 'Entry not found');
+    entry.description = desc;
+    if (!(await db.set(KEY, list))) throw new HttpError(503, 'Database unavailable');
     return publicEntry(entry);
   });
 }
@@ -139,10 +161,12 @@ export async function buildLeaderboardMessages(db) {
   const esc = (t) => String(t).replace(/_/g, '\\_');
 
   const embeds = top.map((e, i) => {
+    const img = avatars.get(e.robloxId) || e.avatarUrl;
+    const label = `${medals[i] ? `${medals[i]} ` : ''}#${i + 1}  ${e.displayName}`;
     const embed = new EmbedBuilder()
       .setColor(colors[i] ?? 0x5865f2)
-      .setDescription(`${medals[i] || `**#${i + 1}**`}  **${esc(e.displayName)}**\n@${esc(e.username)}`);
-    const img = avatars.get(e.robloxId) || e.avatarUrl;
+      .setAuthor(img ? { name: label, iconURL: img } : { name: label })
+      .setDescription(`@${esc(e.username)}${e.description ? `\n${esc(e.description)}` : ''}`);
     if (img) embed.setThumbnail(img);
     return embed;
   });
@@ -177,7 +201,9 @@ img,.ph{width:40px;height:40px;border-radius:50%;background:#3f4147;flex:none}
 .row{display:flex;gap:8px}.row input{flex:1;min-width:0}
 select{flex:1;min-width:0;font:inherit;color:inherit;background:#2b2d31;border:1px solid #3f4147;border-radius:6px;padding:8px 10px}
 li button.up,li button.down{background:#3f4147;padding:6px 9px}
-li[draggable=true]{cursor:grab}li.drag{opacity:.4}li.over{outline:2px solid #5865f2}
+li[draggable=true]{cursor:grabbing}.grip{cursor:grab;color:#949ba4;user-select:none;letter-spacing:-3px;padding:0 4px}
+input.rk{width:54px;text-align:center;font-weight:700;padding:6px 4px}
+input.desc{width:100%;margin-top:6px;padding:6px 8px;font-size:13px}.d{margin-top:4px;font-size:13px;color:#b5bac1;white-space:pre-wrap}li.drag{opacity:.4}li.over{outline:2px solid #5865f2}
 #status{margin-top:12px;min-height:20px;font-size:14px}.ok{color:#57f287}.err{color:#ed4245}.empty{color:#949ba4;margin-top:20px}
 .hidden{display:none}`;
 
@@ -186,9 +212,13 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 const safeImg=u=>/^https:\\/\\/[a-z0-9.-]+\\.rbxcdn\\.com\\//.test(u||'')?u:'';
 function row(e,i,edit){
   const img=safeImg(e.avatarUrl);
-  return '<li '+(edit?'draggable="true" ':'')+'data-id="'+esc(e.id)+'"><span class="rank">'+(i+1)+'</span>'
-   +(img?'<img src="'+esc(img)+'" alt="">':'<span class="ph"></span>')
-   +'<span class="who"><b>'+esc(e.displayName)+'</b><small>@'+esc(e.username)+'</small></span>'
+  const who='<span class="who"><b>'+esc(e.displayName)+'</b><small>@'+esc(e.username)+'</small>'
+    +(edit?'<input class="desc" maxlength="200" placeholder="Add a description" value="'+esc(e.description||'')+'">'
+          :(e.description?'<div class="d">'+esc(e.description)+'</div>':''))+'</span>';
+  return '<li data-id="'+esc(e.id)+'">'
+   +(edit?'<span class="grip" title="Drag to move">&#8942;&#8942;</span><input class="rk" type="number" min="1" value="'+(i+1)+'" title="Spot">'
+         :'<span class="rank">'+(i+1)+'</span>')
+   +(img?'<img src="'+esc(img)+'" alt="">':'<span class="ph"></span>')+who
    +(edit?'<button class="up" title="Move up">&#9650;</button><button class="down" title="Move down">&#9660;</button><button class="del">Remove</button>':'')+'</li>';
 }`;
 
@@ -206,10 +236,10 @@ export const ADMIN_PAGE = `<!doctype html><html lang="en"><head><meta charset="u
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Edit leaderboard</title>
 <style>${CSS}</style></head><body><main>
 <h1>Edit leaderboard</h1>
-<p style="color:#949ba4;font-size:14px">Drag players, or use the arrows, to set their spot. Top is #1.</p>
+<p style="color:#949ba4;font-size:14px">Spot #1 is the top. Type a spot number, drag by the dots, or use the arrows. Click a description to edit it.</p>
 <p><a href="/dashboard">Send messages</a> · <a href="/leaderboard">Public view</a></p>
 <form id="login"><div class="row"><input id="pw" type="password" placeholder="Dashboard password" required><button>Unlock</button></div></form>
-<form id="add" class="row hidden"><input id="u" placeholder="Roblox username" required maxlength="20"><button id="addbtn">Add</button></form>
+<form id="add" class="row hidden"><input id="u" placeholder="Roblox username" required maxlength="20"><input id="d" placeholder="Description (optional)" maxlength="200"><button id="addbtn">Add</button></form>
 <form id="post" class="row hidden" style="margin-top:12px"><select id="guild"></select><select id="channel"></select><button id="postbtn">Post to Discord</button></form>
 <ol id="list"></ol><div id="status"></div>
 <script>${RENDER}
@@ -255,8 +285,8 @@ $('post').onsubmit=async e=>{
 };
 $('add').onsubmit=async e=>{
   e.preventDefault();$('addbtn').disabled=true;say('Looking up Roblox user...');
-  try{await api('',{method:'POST',body:JSON.stringify({username:$('u').value})});
-    $('u').value='';await load();say('Added.','ok')}catch(err){say(err.message,'err')}
+  try{await api('',{method:'POST',body:JSON.stringify({username:$('u').value,description:$('d').value})});
+    $('u').value='';$('d').value='';await load();say('Added.','ok')}catch(err){say(err.message,'err')}
   $('addbtn').disabled=false;
 };
 let busy=false;
@@ -278,7 +308,23 @@ $('list').onclick=async e=>{
   }catch(err){say(err.message,'err')}
 };
 let dragged=null;
-$('list').ondragstart=e=>{dragged=e.target.closest('li');if(dragged){dragged.classList.add('drag');e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain','')}};
+$('list').onmousedown=e=>{const li=e.target.closest('li');if(li)li.draggable=!!e.target.closest('.grip')};
+$('list').onchange=async e=>{
+  const li=e.target.closest('li');if(!li)return;
+  try{
+    if(e.target.classList.contains('rk')){
+      const kids=[...$('list').children];
+      const to=Math.min(Math.max(parseInt(e.target.value,10)||1,1),kids.length)-1;
+      kids.splice(kids.indexOf(li),1);kids.splice(to,0,li);
+      kids.forEach(k=>$('list').appendChild(k));
+      await saveOrder();
+    }else if(e.target.classList.contains('desc')){
+      await api('/'+encodeURIComponent(li.dataset.id),{method:'PATCH',body:JSON.stringify({description:e.target.value})});
+      say('Description saved.','ok');
+    }
+  }catch(err){say(err.message,'err')}
+};
+$('list').ondragstart=e=>{dragged=e.target.closest('li');if(dragged&&!dragged.draggable){dragged=null;return}if(dragged){dragged.classList.add('drag');e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain','')}};
 $('list').ondragover=e=>{
   if(!dragged)return;e.preventDefault();
   const over=e.target.closest('li');
@@ -294,6 +340,6 @@ $('list').ondrop=async e=>{
     dragged=null;await saveOrder();
   }
 };
-$('list').ondragend=()=>{dragged=null;[...$('list').children].forEach(x=>x.classList.remove('drag','over'))};
+$('list').ondragend=()=>{dragged=null;[...$('list').children].forEach(x=>x.draggable=false);[...$('list').children].forEach(x=>x.classList.remove('drag','over'))};
 if(token)load();
 </script></main></body></html>`;

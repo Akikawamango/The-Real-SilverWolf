@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { ChannelType, PermissionFlagsBits } from 'discord.js';
 import { logger } from '../utils/logger.js';
 import {
-  ADMIN_PAGE, getLeaderboard, addEntry, reorderEntries, removeEntry, buildLeaderboardMessages, sendError, HttpError,
+  ADMIN_PAGE, getLeaderboard, addEntry, updateEntry, reorderEntries, removeEntry, buildLeaderboardMessages, sendError, HttpError,
 } from './leaderboard.js';
 
 const SENDABLE_TYPES = new Set([ChannelType.GuildText, ChannelType.GuildAnnouncement]);
@@ -65,6 +65,7 @@ export function createDashboardRouter(client) {
   };
   lb.get('/', wrap(async () => ({ entries: await getLeaderboard(client.db) })));
   lb.post('/', wrap(async (req) => ({ entry: await addEntry(client.db, req.body || {}) })));
+  lb.patch('/:id', wrap(async (req) => ({ entry: await updateEntry(client.db, req.params.id, req.body || {}) })));
   lb.put('/order', wrap(async (req) => ({ entries: await reorderEntries(client.db, (req.body || {}).ids) })));
   lb.delete('/:id', wrap(async (req) => { await removeEntry(client.db, req.params.id); return { ok: true }; }));
   lb.post('/post', async (req, res) => {
