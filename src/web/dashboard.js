@@ -164,11 +164,15 @@ button:disabled{opacity:.5;cursor:default}
 </form>
 <p><a href="/dashboard/leaderboard" style="color:#8ea1e1">Edit leaderboard</a></p>
 <form id="send" class="hidden">
+  <label for="action">Command</label>
+  <select id="action"><option value="message">Send a message</option><option value="leaderboard">Post the leaderboard</option></select>
   <label for="guild">Server</label><select id="guild"></select>
   <label for="channel">Channel</label><select id="channel"></select>
+  <div id="msgbox">
   <label for="content">Message</label>
   <textarea id="content" maxlength="2000" required></textarea>
   <div class="count"><span id="n">0</span>/2000</div>
+  </div>
   <button id="go">Send</button>
 </form>
 <div id="status"></div>
@@ -199,11 +203,22 @@ async function load(){
 $('login').onsubmit=e=>{e.preventDefault();token=$('pw').value;sessionStorage.setItem('dash',token);load()};
 $('guild').onchange=fillChannels;
 $('content').oninput=()=>$('n').textContent=$('content').value.length;
+$('action').onchange=()=>{
+  const lb=$('action').value==='leaderboard';
+  $('msgbox').classList.toggle('hidden',lb);
+  $('content').required=!lb;
+  $('go').textContent=lb?'Post leaderboard':'Send';
+};
 $('send').onsubmit=async e=>{
   e.preventDefault();$('go').disabled=true;say('Sending...');
   try{
-    await api('/send',{method:'POST',body:JSON.stringify({channelId:$('channel').value,content:$('content').value})});
-    $('content').value='';$('n').textContent=0;say('Sent.','ok');
+    if($('action').value==='leaderboard'){
+      await api('/leaderboard/post',{method:'POST',body:JSON.stringify({channelId:$('channel').value})});
+      say('Leaderboard posted.','ok');
+    }else{
+      await api('/send',{method:'POST',body:JSON.stringify({channelId:$('channel').value,content:$('content').value})});
+      $('content').value='';$('n').textContent=0;say('Sent.','ok');
+    }
   }catch(err){say(err.message,'err')}
   $('go').disabled=false;
 };
