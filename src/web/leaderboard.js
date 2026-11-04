@@ -119,7 +119,7 @@ body{margin:0;font-family:system-ui,sans-serif;background:#1e1f22;color:#dbdee1;
 main{width:100%;max-width:560px}
 h1{font-size:20px;margin:0 0 20px}
 a{color:#8ea1e1}
-input,button{font:inherit;color:inherit;background:#2b2d31;border:1px solid #3f4147;border-radius:6px;padding:8px 10px}
+input,select,button{font:inherit;color:inherit;background:#2b2d31;border:1px solid #3f4147;border-radius:6px;padding:8px 10px}
 button{background:#5865f2;border:0;cursor:pointer;font-weight:600}
 button.del{background:#da373c}
 button:disabled{opacity:.5}
@@ -131,6 +131,7 @@ img,.ph{width:40px;height:40px;border-radius:50%;background:#3f4147;flex:none}
 .who{flex:1;min-width:0}.who b{display:block;overflow:hidden;text-overflow:ellipsis}.who small{color:#949ba4}
 .score{font-weight:700;font-variant-numeric:tabular-nums}
 .row{display:flex;gap:8px}.row input{flex:1;min-width:0}
+select{flex:1;min-width:0;font:inherit;color:inherit;background:#2b2d31;border:1px solid #3f4147;border-radius:6px;padding:8px 10px}
 li input{width:90px;text-align:right}
 #status{margin-top:12px;min-height:20px;font-size:14px}.ok{color:#57f287}.err{color:#ed4245}.empty{color:#949ba4;margin-top:20px}
 .hidden{display:none}`;
@@ -164,6 +165,7 @@ export const ADMIN_PAGE = `<!doctype html><html lang="en"><head><meta charset="u
 <p><a href="/dashboard">Send messages</a> · <a href="/leaderboard">Public view</a></p>
 <form id="login"><div class="row"><input id="pw" type="password" placeholder="Dashboard password" required><button>Unlock</button></div></form>
 <form id="add" class="row hidden"><input id="u" placeholder="Roblox username" required maxlength="20"><input id="s" type="number" step="any" value="0" style="max-width:100px"><button id="addbtn">Add</button></form>
+<form id="post" class="row hidden" style="margin-top:12px"><select id="guild"></select><select id="channel"></select><button id="postbtn">Post to Discord</button></form>
 <ol id="list"></ol><div id="status"></div>
 <script>${RENDER}
 const $=id=>document.getElementById(id);
@@ -175,15 +177,37 @@ async function api(path,opts={}){
   if(!r.ok)throw new Error(d.error||('Error '+r.status));
   return d;
 }
+let guilds=[];
+function fillChannels(){
+  const g=guilds.find(x=>x.id===$('guild').value);
+  $('channel').innerHTML='';
+  (g?g.channels:[]).forEach(c=>$('channel').add(new Option('#'+c.name,c.id)));
+}
+async function loadChannels(){
+  const r=await fetch('/dashboard/api/channels',{headers:{Authorization:'Bearer '+token}});
+  if(!r.ok)return;
+  guilds=(await r.json()).guilds;
+  $('guild').innerHTML='';
+  guilds.forEach(g=>$('guild').add(new Option(g.name,g.id)));
+  fillChannels();
+}
 async function load(){
   try{
     const d=await api('');
-    $('login').classList.add('hidden');$('add').classList.remove('hidden');
+    $('login').classList.add('hidden');$('add').classList.remove('hidden');$('post').classList.remove('hidden');
+    if(!guilds.length)await loadChannels();
     $('list').innerHTML=d.entries.map((e,i)=>row(e,i,true)).join('');
     if(!d.entries.length)say('No one yet. Add a Roblox username above.');
   }catch(e){sessionStorage.removeItem('dash');token='';say(e.message,'err')}
 }
 $('login').onsubmit=e=>{e.preventDefault();token=$('pw').value;sessionStorage.setItem('dash',token);load()};
+$('guild').onchange=fillChannels;
+$('post').onsubmit=async e=>{
+  e.preventDefault();$('postbtn').disabled=true;say('Posting...');
+  try{await api('/post',{method:'POST',body:JSON.stringify({channelId:$('channel').value})});say('Posted to Discord.','ok')}
+  catch(err){say(err.message,'err')}
+  $('postbtn').disabled=false;
+};
 $('add').onsubmit=async e=>{
   e.preventDefault();$('addbtn').disabled=true;say('Looking up Roblox user...');
   try{await api('',{method:'POST',body:JSON.stringify({username:$('u').value,score:$('s').value})});
