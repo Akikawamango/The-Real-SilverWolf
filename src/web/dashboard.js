@@ -1,6 +1,6 @@
 import express from 'express';
 import crypto from 'node:crypto';
-import { ChannelType, PermissionFlagsBits } from 'discord.js';
+import { ChannelType, EmbedBuilder, PermissionFlagsBits } from 'discord.js';
 import { logger } from '../utils/logger.js';
 import {
   ADMIN_PAGE, getLeaderboard, addEntry, updateEntry, removeEntry, sendError,
@@ -67,6 +67,34 @@ export function createDashboardRouter(client) {
   lb.post('/', wrap(async (req) => ({ entry: await addEntry(client.db, req.body || {}) })));
   lb.patch('/:id', wrap(async (req) => ({ entry: await updateEntry(client.db, req.params.id, req.body || {}) })));
   lb.delete('/:id', wrap(async (req) => { await removeEntry(client.db, req.params.id); return { ok: true }; }));
+  lb.post('/post', async (req, res) => {
+    const { channelId } = req.body || {};
+    try {
+      const channel = typeof channelId === 'string' ? client.channels.cache.get(channelId) : null;
+      if (!channel || !SENDABLE_TYPES.has(channel.type) || !channel.guild) {
+        return res.status(404).json({ error: 'Channel not found' });
+      }
+      const entries = await getLeaderboard(client.db);
+      if (!entries.length) return res.status(400).json({ error: 'The leaderboard is empty' });
+      const top = entries.slice(0, 25);
+      const medals = ['🥇', '🥈', '🥉'];
+      const esc = (t) => String(t).replace(/_/g, '\\_');
+      const lines = top.map((e, i) =>
+        `${medals[i] || `**${i + 1}.**`} **${esc(e.displayName)}** (@${esc(e.username)}) — ${e.score.toLocaleString('en-US')}`);
+      const embed = new EmbedBuilder()
+        .setTitle('Leaderboard')
+        .setDescription(lines.join('\n').slice(0, 4000))
+        .setColor(0x5865f2)
+        .setTimestamp();
+      if (entries.length > top.length) embed.setFooter({ text: `Top ${top.length} of ${entries.length}` });
+      const sent = await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+      logger.info(`Dashboard leaderboard posted to #${channel.name} (${channel.guild.name})`);
+      res.json({ ok: true, messageId: sent.id });
+    } catch (error) {
+      logger.error('Dashboard leaderboard post failed:', error);
+      res.status(502).json({ error: error?.message || 'Discord rejected the message' });
+    }
+  });
   router.use('/api/leaderboard', lb);
 
   router.get('/api/channels', (req, res) => {
@@ -136,11 +164,15 @@ button:disabled{opacity:.5;cursor:default}
 </form>
 <p><a href="/dashboard/leaderboard" style="color:#8ea1e1">Edit leaderboard</a></p>
 <form id="send" class="hidden">
+  <label for="action">Command</label>
+  <select id="action"><option value="message">Send a message</option><option value="leaderboard">Post the leaderboard</option></select>
   <label for="guild">Server</label><select id="guild"></select>
   <label for="channel">Channel</label><select id="channel"></select>
+  <div id="msgbox">
   <label for="content">Message</label>
   <textarea id="content" maxlength="2000" required></textarea>
   <div class="count"><span id="n">0</span>/2000</div>
+  </div>
   <button id="go">Send</button>
 </form>
 <div id="status"></div>
@@ -171,11 +203,22 @@ async function load(){
 $('login').onsubmit=e=>{e.preventDefault();token=$('pw').value;sessionStorage.setItem('dash',token);load()};
 $('guild').onchange=fillChannels;
 $('content').oninput=()=>$('n').textContent=$('content').value.length;
+$('action').onchange=()=>{
+  const lb=$('action').value==='leaderboard';
+  $('msgbox').classList.toggle('hidden',lb);
+  $('content').required=!lb;
+  $('go').textContent=lb?'Post leaderboard':'Send';
+};
 $('send').onsubmit=async e=>{
   e.preventDefault();$('go').disabled=true;say('Sending...');
   try{
-    await api('/send',{method:'POST',body:JSON.stringify({channelId:$('channel').value,content:$('content').value})});
-    $('content').value='';$('n').textContent=0;say('Sent.','ok');
+    if($('action').value==='leaderboard'){
+      await api('/leaderboard/post',{method:'POST',body:JSON.stringify({channelId:$('channel').value})});
+      say('Leaderboard posted.','ok');
+    }else{
+      await api('/send',{method:'POST',body:JSON.stringify({channelId:$('channel').value,content:$('content').value})});
+      $('content').value='';$('n').textContent=0;say('Sent.','ok');
+    }
   }catch(err){say(err.message,'err')}
   $('go').disabled=false;
 };
