@@ -2,6 +2,7 @@
 import { Client, Collection, GatewayIntentBits } from 'discord.js';
 import { REST } from '@discordjs/rest';
 import express from 'express';
+import { createDashboardRouter } from './web/dashboard.js';
 import cron from 'node-cron';
 
 import config from './config/application.js';
@@ -201,6 +202,12 @@ class TitanBot extends Client {
         metrics,
       });
     });
+
+    const dashboardRouter = createDashboardRouter(this);
+    if (dashboardRouter) {
+      app.use('/dashboard', dashboardRouter);
+      startupLog('Dashboard enabled at /dashboard');
+    }
 
     app.get('/', (req, res) => {
       res.status(200).json({ 
