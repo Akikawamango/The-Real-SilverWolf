@@ -3,6 +3,7 @@ import { Client, Collection, GatewayIntentBits } from 'discord.js';
 import { REST } from '@discordjs/rest';
 import express from 'express';
 import { createDashboardRouter } from './web/dashboard.js';
+import { PUBLIC_PAGE, getLeaderboard } from './web/leaderboard.js';
 import cron from 'node-cron';
 
 import config from './config/application.js';
@@ -208,6 +209,18 @@ class TitanBot extends Client {
       app.use('/dashboard', dashboardRouter);
       startupLog('Dashboard enabled at /dashboard');
     }
+
+    app.get('/leaderboard', (req, res) => {
+      res.set('Cache-Control', 'no-cache').type('html').send(PUBLIC_PAGE);
+    });
+    app.get('/leaderboard/data', async (req, res) => {
+      try {
+        res.json({ entries: await getLeaderboard(this.db) });
+      } catch (error) {
+        logger.error('Leaderboard fetch failed:', error);
+        res.status(500).json({ error: 'Could not load leaderboard' });
+      }
+    });
 
     app.get('/', (req, res) => {
       res.status(200).json({ 
